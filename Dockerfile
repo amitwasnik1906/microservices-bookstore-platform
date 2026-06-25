@@ -5,19 +5,10 @@
 # so Maven runs a single time for the entire `docker compose build`.
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /build
-# Cache dependencies first for faster incremental rebuilds.
-COPY pom.xml .
-COPY backend-user/pom.xml        backend-user/pom.xml
-COPY service-batch/pom.xml       service-batch/pom.xml
-COPY service-books/pom.xml       service-books/pom.xml
-COPY service-config/pom.xml      service-config/pom.xml
-COPY service-discovery/pom.xml   service-discovery/pom.xml
-COPY service-mails/pom.xml       service-mails/pom.xml
-COPY service-prices/pom.xml      service-prices/pom.xml
-COPY service-users/pom.xml       service-users/pom.xml
-RUN mvn -B -q dependency:go-offline || true
 COPY . .
-RUN mvn -B clean package -DskipTests
+# A BuildKit cache mount keeps the Maven repo (~/.m2) between builds, so dependencies are
+# downloaded once and reused — later builds only recompile. No -q, so progress is visible.
+RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests
 
 # ---- Per-service runtime stages (Java 17 JRE) ----
 FROM eclipse-temurin:17-jre AS service-discovery
