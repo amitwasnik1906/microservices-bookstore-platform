@@ -1,0 +1,164 @@
+name: bookstore
+
+# Common environment shared by all Spring app containers. The hostnames map to the
+# compose service names below; the YAML placeholders (${VAR:localhost}) in the config
+# files fall back to localhost when these are absent (i.e. a plain `mvn spring-boot:run`).
+x-app-env: &app-env
+  CONFIG_HOST: service-config
+  EUREKA_HOST: service-discovery
+  DB_HOST: postgres
+  ZIPKIN_HOST: zipkin
+  KAFKA_HOST: kafka
+  EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+
+services:
+  # ---------- Infrastructure ----------
+  postgres:
+    build: ./database-image          # runs init.sql -> creates service_* roles + schemas
+    environment:
+      POSTGRES_USER: ser
+      POSTGRES_PASSWORD: ser
+      POSTGRES_DB: bookstore
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"   # host 5433 -> container 5432 (5432 left free for any local Postgres)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ser -d bookstore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  zipkin:
+    image: openzipkin/zipkin
+    ports:
+      - "9412:9411"   # host 9412 -> container 9411 (9411 left free for any local Zipkin)
+
+  # ---------- Platform services ----------
+  service-discovery:
+    build:
+      context: .
+      target: service-discovery
+    environment:
+      ZIPKIN_HOST: zipkin
+    ports:
+      - "8761:8761"
+    depends_on:
+      - zipkin
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/8761' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  service-config:
+    build:
+      context: .
+      target: service-config
+    environment:
+      EUREKA_HOST: service-discovery
+      ZIPKIN_HOST: zipkin
+    ports:
+      - "8888:8888"
+    depends_on:
+      service-discovery:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/8888' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ---------- Application services ----------
+  backend-user:                       # API Gateway (public entry point)
+    build:
+      context: .
+      target: backend-user
+    environment: *app-env
+    ports:
+      - "8081:8081"
+    depends_on:
+      service-config:
+        condition: service_healthy
+
+  service-books:
+    build:
+      context: .
+      target: service-books
+    environment: *app-env
+    depends_on:
+      service-config:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  service-prices:
+    build:
+      context: .
+      target: service-prices
+    environment: *app-env
+    depends_on:
+      service-config:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  service-users:
+    build:
+      context: .
+      target: service-users
+    environment:
+      <<: *app-env
+      SPRING_CLOUD_STREAM_KAFKA_BINDER_BROKERS: kafka:9092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092   # MailService uses a plain KafkaTemplate
+    depends_on:
+      service-config:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  service-mails:
+    build:
+      context: .
+      target: service-mails
+    environment:
+      <<: *app-env
+      SPRING_CLOUD_STREAM_KAFKA_BINDER_BROKERS: kafka:9092
+    depends_on:
+      service-config:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  service-batch:
+    build:
+      context: .
+      target: service-batch
+    environment: *app-env
+    depends_on:
+      service-config:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
